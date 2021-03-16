@@ -2,15 +2,16 @@ import unicodedata
 from hashlib import pbkdf2_hmac
 from secrets import token_bytes
 from sys import platform
-from typing import List, Optional, Tuple
+from typing import Any, List, Optional, Tuple
 
-import keyring as keyring_main
 import pkg_resources
 from bitstring import BitArray
 from blspy import AugSchemeMPL, G1Element, PrivateKey
-from keyrings.cryptfile.cryptfile import CryptFileKeyring
-
 from src.util.hash import std_hash
+import keyring as keyring_main
+from keyrings.cryptfile.cryptfile import CryptFileKeyring
+from .locking_keyring import LockingKeyring
+
 
 MAX_KEYS = 100
 
@@ -23,10 +24,17 @@ elif platform == "darwin":
 
     keyring.set_keyring(keyring.backends.OS_X.Keyring())
 elif platform == "linux":
-    keyring = CryptFileKeyring()
-    keyring.keyring_key = "your keyring password"  # type: ignore
+    keyring_module = CryptFileKeyring()
+    keyring_module.keyring_key = "your keyring password"  # type: ignore
 else:
-    keyring = keyring_main
+    keyring_module = keyring_main
+
+# The Python-provided keyring is system-global, so it is important
+# that the lockfile is also system-global. It might be nice to have
+# the lockfile next to the python keyring, which is
+# ~/.local/share/python_keyring/cryptfile_pass.cfg on Ubunto 20.04
+# xxx above keyring is module. this keyring is a class
+keyring_hack: Any = LockingKeyring("/tmp/chia-keyring.lock", keyring_module)
 
 
 def bip39_word_list() -> str:
@@ -135,11 +143,11 @@ class Keychain:
 
     def _get_pk_and_entropy(self, user: str) -> Optional[Tuple[G1Element, bytes]]:
         """
-        Returns the keychain conntents for a specific 'user' (key index). The contents
+        Returns the keychain contents for a specific 'user' (key index). The contents
         include an G1Element and the entropy required to generate the private key.
         Note that generating the actual private key also requires the passphrase.
         """
-        read_str = keyring.get_password(self._get_service(), user)
+        read_str = keyring_hack.get_password(self._get_service(), user)
         if read_str is None or len(read_str) == 0:
             return None
         str_bytes = bytes.fromhex(read_str)
@@ -181,11 +189,12 @@ class Keychain:
         key = AugSchemeMPL.key_gen(seed)
         fingerprint = key.get_g1().get_fingerprint()
 
+        # xxx get_all_public_keys - could be better
         if fingerprint in [pk.get_fingerprint() for pk in self.get_all_public_keys()]:
             # Prevents duplicate add
             return key
 
-        keyring.set_password(
+        keyring_hack.set_password(
             self._get_service(),
             self._get_private_key_user(index),
             bytes(key.get_g1()).hex() + entropy.hex(),
@@ -295,7 +304,7 @@ class Keychain:
             if pkent is not None:
                 pk, ent = pkent
                 if pk.get_fingerprint() == fingerprint:
-                    keyring.delete_password(self._get_service(), self._get_private_key_user(index))
+                    keyring_hack.delete_password(self._get_service(), self._get_private_key_user(index))
             index += 1
             pkent = self._get_pk_and_entropy(self._get_private_key_user(index))
 
@@ -310,7 +319,7 @@ class Keychain:
         while True:
             try:
                 pkent = self._get_pk_and_entropy(self._get_private_key_user(index))
-                keyring.delete_password(self._get_service(), self._get_private_key_user(index))
+                keyring_hack.delete_password(self._get_service(), self._get_private_key_user(index))
             except Exception:
                 # Some platforms might throw on no existing key
                 delete_exception = True
@@ -321,14 +330,16 @@ class Keychain:
             index += 1
 
         index = 0
-        delete_exception = True
+        delete_exception = True  # wtf
         pkent = None
         while True:
             try:
                 pkent = self._get_pk_and_entropy(
                     self._get_private_key_user(index)
                 )  # changed from _get_fingerprint_and_entropy to _get_pk_and_entropy - GH
-                keyring.delete_password(self._get_service(), self._get_private_key_user(index))
+                # xxx this may have been _get_fingerprint_and_entropy to clear old entries.
+                # If so, that person should have left a comment.
+                keyring_hack.delete_password(self._get_service(), self._get_private_key_user(index))
             except Exception:
                 # Some platforms might throw on no existing key
                 delete_exception = True
